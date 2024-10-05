@@ -6,7 +6,14 @@ services:
     environment:
       # Cookie (Required)
       - COOKIE=
+      # User ID (Required)
+      - USER_ID=
       # Bark URL (Optional)
       - BARK_URL=
       # Use UTC Time (UTC 00:05 is 08:05 in China) (Optional, Default: 00:05)
       - SCHEDULED_TIME=00:05
+      # Timezone offset (Optional, Default: 8)
+      - TIMEZONE_OFFSET=8
+      # Telegram Token (Optional)
+      - TELEGRAM_TOKEN=
+      - TELEGRAM_CHAT_ID=
