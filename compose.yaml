@@ -17,3 +17,5 @@ services:
       # Telegram Token (Optional)
       - TELEGRAM_TOKEN=
       - TELEGRAM_CHAT_ID=
+      # en：Whether to run immediately after running(Optional, Default: false, eg: true/false)
+      - IS_RUN_IMMEDIATELY=false

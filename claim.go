@@ -30,13 +30,14 @@ import (
 
 // Config holds all configuration variables
 type Config struct {
-	Cookie         string
-	UserID         string
-	BarkURL        string
-	TelegramToken  string
-	TelegramChatID string
-	ScheduledTime  string
-	TimeZoneOffset int
+	Cookie           string
+	UserID           string
+	BarkURL          string
+	TelegramToken    string
+	TelegramChatID   string
+	ScheduledTime    string
+	isRunImmediately bool
+	TimeZoneOffset   int
 }
 
 // Client wraps the HTTP client and other dependencies
@@ -57,39 +58,14 @@ func NewClient(config *Config) *Client {
 
 // sendToTelegram sends a message to Telegram
 func (c *Client) sendToTelegram(message string) error {
-	title := "*Follow Claim*"
-	fullMessage := fmt.Sprintf("%s\n%s", title, message)
-
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", c.Config.TelegramToken)
 	payload := map[string]string{
 		"chat_id":    c.Config.TelegramChatID,
-		"text":       fullMessage,
+		"text":       "*Follow Claim*\n" + message,
 		"parse_mode": "Markdown",
 	}
 
-	jsonPayload, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal Telegram payload: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(context.Background(), "POST", url, bytes.NewBuffer(jsonPayload))
-	if err != nil {
-		return fmt.Errorf("failed to create Telegram request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to send Telegram message: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Telegram API returned status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-
-	return nil
+	return c.postRequest(url, payload)
 }
 
 // sendToBark sends a notification to Bark if enabled
@@ -98,35 +74,37 @@ func (c *Client) sendToBark(message string) {
 		return
 	}
 
-	url := c.Config.BarkURL
-	payload := map[string]string{
-		"body": message,
+	payload := map[string]string{"body": message}
+	if err := c.postRequest(c.Config.BarkURL, payload); err != nil {
+		log.Printf("Failed to send Bark notification: %v", err)
 	}
+}
 
+// postRequest sends a POST request with JSON payload
+func (c *Client) postRequest(url string, payload interface{}) error {
 	jsonPayload, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("Failed to marshal Bark payload: %v", err)
-		return
+		return fmt.Errorf("failed to marshal payload: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(context.Background(), "POST", url, bytes.NewBuffer(jsonPayload))
 	if err != nil {
-		log.Printf("Failed to create Bark request: %v", err)
-		return
+		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		log.Printf("Failed to send Bark notification: %v", err)
-		return
+		return fmt.Errorf("failed to send request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		log.Printf("Bark API returned status %d: %s", resp.StatusCode, string(bodyBytes))
+		return fmt.Errorf("API returned status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
+
+	return nil
 }
 
 // parseScheduledTime parses the scheduled time in "HH:MM" format
@@ -148,23 +126,10 @@ func (c *Client) signFollow() (string, error) {
 	url := "https://api.follow.is/wallets/transactions/claim_daily"
 	payload := map[string]string{"csrfToken": extractCSRFToken(c.Config.Cookie)}
 
-	jsonPayload, err := json.Marshal(payload)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal claim payload: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(context.Background(), "POST", url, bytes.NewBuffer(jsonPayload))
+	req, err := c.newRequest("POST", url, payload)
 	if err != nil {
 		return "", fmt.Errorf("failed to create claim request: %w", err)
 	}
-
-	req.Header.Set("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "+
-		"AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "+
-		"MicroMessenger/8.0.38(0x1800262c) NetType/4G Language/zh_CN")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Cookie", c.Config.Cookie)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -191,17 +156,10 @@ func (c *Client) signFollow() (string, error) {
 // getCoinBalance retrieves the coin balance
 func (c *Client) getCoinBalance() (string, error) {
 	url := fmt.Sprintf("https://api.follow.is/wallets?userId=%s", c.Config.UserID)
-	req, err := http.NewRequestWithContext(context.Background(), "GET", url, nil)
+	req, err := c.newRequest("GET", url, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create wallet request: %w", err)
 	}
-
-	req.Header.Set("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "+
-		"AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "+
-		"MicroMessenger/8.0.38(0x1800262c) NetType/4G Language/zh_CN")
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Cookie", c.Config.Cookie)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
@@ -248,23 +206,48 @@ func (c *Client) getCoinBalance() (string, error) {
 	return fmt.Sprintf("%f", dailyPowerToken), nil
 }
 
+// newRequest creates a new HTTP request with common headers
+func (c *Client) newRequest(method, url string, payload interface{}) (*http.Request, error) {
+	var body io.Reader
+	if payload != nil {
+		jsonPayload, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal payload: %w", err)
+		}
+		body = bytes.NewBuffer(jsonPayload)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), method, url, body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "+
+		"AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "+
+		"MicroMessenger/8.0.38(0x1800262c) NetType/4G Language/zh_CN")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Cookie", c.Config.Cookie)
+
+	return req, nil
+}
+
 func main() {
-	// 初始化配置
 	config := &Config{
-		Cookie:         os.Getenv("COOKIE"),
-		UserID:         os.Getenv("USER_ID"),
-		BarkURL:        os.Getenv("BARK_URL"),
-		TelegramToken:  os.Getenv("TELEGRAM_TOKEN"),
-		TelegramChatID: os.Getenv("TELEGRAM_CHAT_ID"),
-		ScheduledTime:  os.Getenv("SCHEDULED_TIME"),
+		Cookie:           os.Getenv("COOKIE"),
+		UserID:           os.Getenv("USER_ID"),
+		BarkURL:          os.Getenv("BARK_URL"),
+		TelegramToken:    os.Getenv("TELEGRAM_TOKEN"),
+		TelegramChatID:   os.Getenv("TELEGRAM_CHAT_ID"),
+		ScheduledTime:    os.Getenv("SCHEDULED_TIME"),
+		isRunImmediately: os.Getenv("IS_RUN_IMMEDIATELY") == "true",
 		TimeZoneOffset: func() int {
-			// TIMEZONE_OFFSET 可能不会配置，所以默认为东八区
 			offsetStr := os.Getenv("TIMEZONE_OFFSET")
 			if offsetStr == "" {
 				log.Printf("TIMEZONE_OFFSET is not set, defaulting to 8")
-
+				return 8
 			}
-
 			offset, err := strconv.Atoi(offsetStr)
 			if err != nil {
 				log.Fatalf("Invalid TIMEZONE_OFFSET: %v", err)
@@ -274,15 +257,12 @@ func main() {
 		}(),
 	}
 
-	// 验证必要的环境变量
 	if config.Cookie == "" {
 		log.Fatal("COOKIE must be set in environment variables")
 	}
 	if config.UserID == "" {
 		log.Fatal("USER_ID must be set in environment variables")
 	}
-
-	// 设置默认调度时间
 	if config.ScheduledTime == "" {
 		config.ScheduledTime = "00:05"
 	}
@@ -294,38 +274,15 @@ func main() {
 
 	client := NewClient(config)
 
+	// 按需立即执行任务
+	if config.isRunImmediately {
+		runTask(client, config)
+	}
+
 	// 初始化 cron 调度器
+	cronSpec := fmt.Sprintf("%d %d * * *", minute, hour)
 	c := cron.New(cron.WithLocation(time.UTC))
-	cronSpec := fmt.Sprintf("%d %d * * *", minute, hour) // 分 时 日 月 周
-
-	_, err = c.AddFunc(cronSpec, func() {
-		log.Println("Starting scheduled task...")
-
-		claimResult, err := client.signFollow()
-		if err != nil {
-			log.Printf("signFollow error: %v", err)
-			claimResult = err.Error()
-		}
-
-		balance, err := client.getCoinBalance()
-		if err != nil {
-			log.Printf("getCoinBalance error: %v", err)
-			balance = err.Error()
-		}
-
-		currentDate := time.Now().In(time.FixedZone("UTC", config.TimeZoneOffset*60*60)).Format("2006-01-02 15:04:05") + " UTC" + fmt.Sprintf("%+d", config.TimeZoneOffset)
-		logMessage := fmt.Sprintf("\n%s\nCoin Balance: %s\n\nDate: %s", claimResult, balance, currentDate)
-		if config.TelegramToken != "" && config.TelegramChatID != "" {
-			if err := client.sendToTelegram(logMessage); err != nil {
-				log.Printf("Failed to send Telegram message: %v", err)
-			} else {
-				log.Println("Telegram message sent successfully.")
-			}
-		}
-
-		log.Println("Scheduled task completed. \n", logMessage)
-	})
-
+	_, err = c.AddFunc(cronSpec, func() { runTask(client, config) })
 	if err != nil {
 		log.Fatalf("Error scheduling task: %v", err)
 	}
@@ -333,4 +290,32 @@ func main() {
 	c.Start()
 	log.Printf("Scheduler started. Will run daily at %02d:%02d UTC.\n", hour, minute)
 	select {}
+}
+
+func runTask(client *Client, config *Config) {
+	log.Println("Starting scheduled task...")
+
+	claimResult, err := client.signFollow()
+	if err != nil {
+		log.Printf("signFollow error: %v", err)
+		claimResult = err.Error()
+	}
+
+	balance, err := client.getCoinBalance()
+	if err != nil {
+		log.Printf("getCoinBalance error: %v", err)
+		balance = err.Error()
+	}
+
+	currentDate := time.Now().In(time.FixedZone("UTC", config.TimeZoneOffset*60*60)).Format("2006-01-02 15:04:05") + " UTC" + fmt.Sprintf("%+d", config.TimeZoneOffset)
+	logMessage := fmt.Sprintf("\n%s\nCoin Balance: %s\n\nDate: %s", claimResult, balance, currentDate)
+	if config.TelegramToken != "" && config.TelegramChatID != "" {
+		if err := client.sendToTelegram(logMessage); err != nil {
+			log.Printf("Failed to send Telegram message: %v", err)
+		} else {
+			log.Println("Telegram message sent successfully.")
+		}
+	}
+
+	log.Println("Scheduled task completed.\n", logMessage)
 }
